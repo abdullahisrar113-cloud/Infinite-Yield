@@ -1,0 +1,168 @@
+-- LocalScript (place inside StarterPlayer > StarterPlayerScripts)
+-- Gives every player: toggle fly (F), infinite jump, and speed boost (LeftShift).
+-- WARNING: This is client-side and intended for testing. Do NOT use as-is in a public game without server checks.
+
+-- CONFIG
+local TOGGLE_FLY_KEY = Enum.KeyCode.F
+local BOOST_KEY = Enum.KeyCode.LeftShift
+
+local BASE_WALK_SPEED = 16      -- normal ground speed
+local FLY_SPEED = 120           -- base flying speed (studs/sec)
+local BOOST_MULTIPLIER = 3      -- multiplies speed while boosting
+local JUMP_POWER = 200          -- jump power used for infinite jump
+
+-- SERVICES
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+if not player then return end
+
+-- wait for character
+local function getCharacter()
+	local char = player.Character
+	if not char then
+		char = player.CharacterAdded:Wait()
+	end
+	return char
+end
+
+-- state
+local flying = false
+local boosting = false
+
+-- helper: enable powers on a character
+local function setupCharacter(character)
+	local humanoid = character:WaitForChild("Humanoid")
+	local rootPart = character:WaitForChild("HumanoidRootPart")
+
+	-- set jump power for consistent jumping
+	humanoid.UseJumpPower = true
+	humanoid.JumpPower = JUMP_POWER
+
+	-- infinite jump
+	UserInputService.JumpRequest:Connect(function()
+		-- only change state if humanoid exists
+		if humanoid and humanoid.Parent then
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end)
+
+	-- input listeners
+	UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed then return end
+		if input.KeyCode == TOGGLE_FLY_KEY then
+			flying = not flying
+			if flying then
+				-- disable default humanoid physics for the player so we control movement
+				if humanoid and humanoid.Parent then
+					humanoid.PlatformStand = true
+				end
+			else
+				if humanoid and humanoid.Parent then
+					humanoid.PlatformStand = false
+					-- stop velocity we applied (preserve Y velocity so gravity/landing behaves)
+					rootPart.Velocity = Vector3.new(0, rootPart.Velocity.Y, 0)
+				end
+			end
+		elseif input.KeyCode == BOOST_KEY then
+			boosting = true
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input, gameProcessed)
+		if input.KeyCode == BOOST_KEY then
+			boosting = false
+		end
+	end)
+
+	-- main movement loop (smooth)
+	RunService.RenderStepped:Connect(function()
+		-- make sure character still valid
+		if not character.Parent then return end
+		if not humanoid or not rootPart then
+			humanoid = character:FindFirstChild("Humanoid")
+			rootPart = character:FindFirstChild("HumanoidRootPart")
+			if not humanoid or not rootPart then return end
+		end
+
+		-- compute current speeds
+		local currentFlySpeed = FLY_SPEED
+		local currentWalkSpeed = BASE_WALK_SPEED
+		if boosting then
+			currentFlySpeed = currentFlySpeed * BOOST_MULTIPLIER
+			currentWalkSpeed = currentWalkSpeed * BOOST_MULTIPLIER
+		end
+
+		if flying then
+			-- take over movement
+			humanoid.WalkSpeed = 0
+			humanoid.PlatformStand = true
+
+			-- build move vector from camera-relative input
+			local cam = workspace.CurrentCamera
+			if not cam then return end
+			local moveVec = Vector3.new()
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+				moveVec = moveVec + cam.CFrame.LookVector
+			end
+			if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+				moveVec = moveVec - cam.CFrame.LookVector
+			end
+			if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+				moveVec = moveVec - cam.CFrame.RightVector
+			end
+			if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+				moveVec = moveVec + cam.CFrame.RightVector
+			end
+
+			-- vertical flight controls
+			if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+				moveVec = moveVec + Vector3.new(0, 1, 0)
+			end
+			if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.C) then
+				moveVec = moveVec - Vector3.new(0, 1, 0)
+			end
+
+			-- apply velocity
+			if moveVec.Magnitude > 0.1 then
+				local vel = moveVec.Unit * currentFlySpeed
+				-- set velocity directly (server physics will still run)
+				rootPart.Velocity = Vector3.new(vel.X, vel.Y, vel.Z)
+			else
+				-- slowly damp movement when no input (stop drifting)
+				rootPart.Velocity = Vector3.new(0, 0, 0)
+			end
+		else
+			-- normal walking behavior (but allow boosted speed while not flying)
+			humanoid.PlatformStand = false
+			humanoid.WalkSpeed = currentWalkSpeed
+			-- do not change vertical velocity here
+		end
+	end)
+end
+
+-- initial setup for existing character
+local char = getCharacter()
+if char then
+	setupCharacter(char)
+end
+
+-- setup again when respawning
+player.CharacterAdded:Connect(function(newChar)
+	-- small delay to ensure parts exist
+	newChar:WaitForChild("HumanoidRootPart")
+	newChar:WaitForChild("Humanoid")
+	setupCharacter(newChar)
+end)
+
+-- optional on-screen hint (Studio + live)
+pcall(function()
+	game:GetService("StarterGui"):SetCore("SendNotification", {
+		Title = "Test Powers Active";
+		Text = "F = toggle fly • Shift = boost • Space = infinite jump • Ctrl/C = descend";
+		Duration = 6;
+	})
+end)
