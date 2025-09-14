@@ -1,0 +1,81 @@
+-- Client: TestPowers_Client.lua
+-- Place in StarterPlayer > StarterPlayerScripts
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local EVENT = ReplicatedStorage:WaitForChild("TestPowers_Input")
+local player = Players.LocalPlayer
+
+-- config (should match server for best UX)
+local TOGGLE_FLY_KEY = Enum.KeyCode.F
+local BOOST_KEY = Enum.KeyCode.LeftShift
+
+local flying = false
+local boosting = false
+local jumpRequested = false
+
+-- toggle and boost keys
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == TOGGLE_FLY_KEY then
+        flying = not flying
+    elseif input.KeyCode == BOOST_KEY then
+        boosting = true
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == BOOST_KEY then
+        boosting = false
+    end
+end)
+
+-- convert camera-relative input to a world-space Vector3 to send to server
+local function getMoveVector()
+    local cam = workspace.CurrentCamera
+    if not cam then return Vector3.new(0,0,0) end
+    local mv = Vector3.new()
+    if UserInputService:IsKeyDown(Enum.KeyCode.W) then mv = mv + cam.CFrame.LookVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.S) then mv = mv - cam.CFrame.LookVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.A) then mv = mv - cam.CFrame.RightVector end
+    if UserInputService:IsKeyDown(Enum.KeyCode.D) then mv = mv + cam.CFrame.RightVector end
+
+    -- vertical control while flying
+    if flying then
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then mv = mv + Vector3.new(0,1,0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.C) then mv = mv - Vector3.new(0,1,0) end
+    end
+
+    -- return the vector (server will clamp magnitude)
+    return mv
+end
+
+-- infinite-jump request
+UserInputService.JumpRequest:Connect(function()
+    jumpRequested = true
+end)
+
+-- send inputs at Heartbeat rate
+RunService.Heartbeat:Connect(function()
+    local move = getMoveVector()
+    local sendMove = Vector3.new(0,0,0)
+    if move.Magnitude > 0 then
+        sendMove = move.Unit
+    end
+
+    -- payload: small validated intent
+    local payload = {
+        move = sendMove,
+        fly = flying,
+        boost = boosting,
+        jump = jumpRequested
+    }
+
+    pcall(function()
+        EVENT:FireServer(payload)
+    end)
+
+    jumpRequested = false
+end)
+           
