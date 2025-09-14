@@ -1,0 +1,226 @@
+-- Server: TestPowers_AntiCheat.lua
+-- Place in ServerScriptService
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
+
+local EVENT = ReplicatedStorage:WaitForChild("TestPowersEvent") -- RemoteEvent
+
+-- CONFIG (server-side authoritative thresholds)
+local BASE_WALK_SPEED = 16
+local FLY_SPEED = 100           -- expected client fly speed
+local BOOST_MULTIPLIER = 3
+local JUMP_POWER = 200
+
+local CHECK_INTERVAL = 0.5      -- seconds between server movement checks
+local SPEED_TOLERANCE = 1.5     -- allowable multiplier over expected speeds before flagging
+local MAX_FLAGS_BEFORE_RESET = 3
+local MAX_RESETS_BEFORE_KICK = 3
+local RESET_COOLDOWN = 10       -- seconds after a reset before re-granting powers
+
+-- Per-player tracking
+local playersData = {} -- [player] = {lastPos = Vector3, flags = int, resets = int, canUse = bool, lastResetAt = time}
+
+local function giveDefaultStats(humanoid)
+    if not humanoid then return end
+    humanoid.WalkSpeed = BASE_WALK_SPEED
+    humanoid.UseJumpPower = true
+    humanoid.JumpPower = JUMP_POWER
+end
+
+local function grantPowersFor(player)
+    local data = playersData[player]
+    if data then
+        data.canUse = true
+        data.flags = 0
+        data.lastResetAt = nil
+    end
+    -- initial stats will be set on character spawn
+end
+
+local function revokePowersFor(player, reason)
+    local data = playersData[player]
+    if not data then return end
+    data.canUse = false
+    data.lastResetAt = os.time()
+    -- inform player
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "Test Powers Revoked",
+            Text = tostring(reason) or "Revoked by server",
+            Duration = 5
+        })
+    end)
+end
+
+-- RemoteEvent handlers (client asks to toggle fly / boost)
+-- We only accept toggle requests; server DOES NOT trust client movement values.
+-- payload: {action = "ToggleFly" or "BoostOn" or "BoostOff"}
+EVENT.OnServerEvent:Connect(function(player, payload)
+    if typeof(payload) ~= "table" or not payload.action then return end
+    local data = playersData[player]
+    if not data then return end
+    -- if the player is temporarily blocked, ignore
+    if data.canUse == false and data.lastResetAt and os.time() - data.lastResetAt < RESET_COOLDOWN then
+        -- ignore
+        return
+    end
+
+    if payload.action == "RequestEnable" then
+        grantPowersFor(player)
+    elseif payload.action == "ToggleFly" then
+        -- record intention; server doesn't apply physics here. Client will manage movement locally.
+        -- This server-side message exists mainly to keep an audit trail or future server-side authoritative move.
+        -- We don't need to do more here; movement is validated by position checks below.
+        -- Optionally we could log or store the state in data if needed.
+        data.wantFly = not data.wantFly
+    elseif payload.action == "BoostOn" then
+        data.wantBoost = true
+    elseif payload.action == "BoostOff" then
+        data.wantBoost = false
+    end
+end)
+
+-- When player added, initialize tracking + grant default start powers for testing everyone
+Players.PlayerAdded:Connect(function(player)
+    playersData[player] = {
+        lastPos = nil,
+        lastCheck = os.clock(),
+        flags = 0,
+        resets = 0,
+        canUse = true,    -- by default everyone can use test powers
+        lastResetAt = nil,
+        wantFly = false,
+        wantBoost = false
+    }
+
+    -- Character spawn handler
+    local function onCharacter(char)
+        local humanoid = char:WaitForChild("Humanoid")
+        local root = char:WaitForChild("HumanoidRootPart")
+
+        giveDefaultStats(humanoid)
+
+        -- record initial position
+        local data = playersData[player]
+        if data then
+            data.lastPos = root.Position
+            data.lastCheck = os.clock()
+            data.flags = 0
+        end
+    end
+
+    if player.Character then
+        onCharacter(player.Character)
+    end
+    player.CharacterAdded:Connect(onCharacter)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    playersData[player] = nil
+end)
+
+-- Server movement validator loop
+while true do
+    local now = os.clock()
+    for player, data in pairs(playersData) do
+        -- skip nil or not in game
+        if not player.Parent then
+            playersData[player] = nil
+            continue
+        end
+
+        local char = player.Character
+        if not char then
+            -- nothing to check
+            continue
+        end
+
+        local root = char:FindFirstChild("HumanoidRootPart")
+        local humanoid = char:FindFirstChild("Humanoid")
+        if not root or not humanoid then
+            continue
+        end
+
+        -- compute delta time and distance
+        local lastPos = data.lastPos
+        local dt = now - (data.lastCheck or now)
+        if dt <= 0 then dt = 0.001 end
+        local curPos = root.Position
+
+        if lastPos then
+            local dist = (curPos - lastPos).Magnitude
+            local speed = dist / dt -- studs/sec observed by server
+
+            -- compute expected maximum speed for current state
+            -- If server doesn't know if client is boosting/flying, we estimate using wantBoost/wantFly flags (best-effort).
+            -- Allow some tolerance; flag if exceeded consistently.
+            local expectedMax = BASE_WALK_SPEED
+            if data.wantFly then
+                expectedMax = FLY_SPEED
+            end
+            if data.wantBoost then
+                expectedMax = expectedMax * BOOST_MULTIPLIER
+            end
+
+            local threshold = expectedMax * SPEED_TOLERANCE
+
+            if speed > threshold then
+                -- flag suspicious movement
+                data.flags = (data.flags or 0) + 1
+                warn(("[AntiCheat] %s flagged (speed %.1f > threshold %.1f). Flags: %d"):format(player.Name, speed, threshold, data.flags))
+
+                -- escalate
+                if data.flags >= MAX_FLAGS_BEFORE_RESET then
+                    -- reset player's character and temporarily revoke powers
+                    data.resets = (data.resets or 0) + 1
+                    data.flags = 0
+                    data.canUse = false
+                    data.lastResetAt = os.time()
+
+                    -- reset character
+                    pcall(function()
+                        player:LoadCharacter()
+                    end)
+
+                    -- send chat warning
+                    local reason = "Suspicious movement detected. Test powers revoked temporarily."
+                    pcall(function()
+                        StarterGui:SetCore("SendNotification", {
+                            Title = "Anti-Cheat",
+                            Text = reason,
+                            Duration = 5
+                        })
+                    end)
+
+                    warn(("[AntiCheat] %s had their powers revoked (%d resets)."):format(player.Name, data.resets))
+
+                    if data.resets >= MAX_RESETS_BEFORE_KICK then
+                        -- final escalation: kick the player for persistent tampering
+                        local success, err = pcall(function()
+                            player:Kick("You were kicked for persistent suspicious movement detected by anti-cheat.")
+                        end)
+                        if not success then
+                            warn("Failed to kick player:", err)
+                        end
+                        -- clean up
+                        playersData[player] = nil
+                    end
+                end
+            else
+                -- small forgiveness: decay flags slowly
+                if data.flags and data.flags > 0 then
+                    data.flags = math.max(0, data.flags - 1)
+                end
+            end
+        end
+
+        -- update last pos/time
+        data.lastPos = curPos
+        data.lastCheck = now
+    end
+
+    wait(CHECK_INTERVAL)
+end
