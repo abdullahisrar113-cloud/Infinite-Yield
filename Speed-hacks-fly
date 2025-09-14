@@ -1,0 +1,124 @@
+-- LocalScript: put inside StarterPlayer > StarterPlayerScripts
+-- Everyone gets infinite jump, flying (F), and speed boost (Shift).
+
+-- CONFIG
+local TOGGLE_FLY_KEY = Enum.KeyCode.F
+local BOOST_KEY = Enum.KeyCode.LeftShift
+
+local BASE_WALK_SPEED = 16      -- normal walk speed
+local FLY_SPEED = 100           -- flight speed
+local BOOST_MULTIPLIER = 3      -- speed multiplier when boosting
+local JUMP_POWER = 200          -- power for infinite jump
+
+-- SERVICES
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local character, humanoid, rootPart
+local flying = false
+local boosting = false
+
+-- ensure character is ready
+local function loadCharacter()
+	character = player.Character or player.CharacterAdded:Wait()
+	humanoid = character:WaitForChild("Humanoid")
+	rootPart = character:WaitForChild("HumanoidRootPart")
+
+	-- setup jump
+	humanoid.UseJumpPower = true
+	humanoid.JumpPower = JUMP_POWER
+
+	-- infinite jump
+	UserInputService.JumpRequest:Connect(function()
+		if humanoid and humanoid.Parent then
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end)
+end
+
+loadCharacter()
+player.CharacterAdded:Connect(loadCharacter)
+
+-- input handling
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	if input.KeyCode == TOGGLE_FLY_KEY then
+		flying = not flying
+		if flying then
+			humanoid.PlatformStand = true
+		else
+			humanoid.PlatformStand = false
+			rootPart.Velocity = Vector3.new(0, rootPart.Velocity.Y, 0)
+		end
+	elseif input.KeyCode == BOOST_KEY then
+		boosting = true
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+	if input.KeyCode == BOOST_KEY then
+		boosting = false
+	end
+end)
+
+-- helper to get movement direction
+local function getMoveVector()
+	local cam = workspace.CurrentCamera
+	local move = Vector3.new()
+	if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+		move = move + cam.CFrame.LookVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+		move = move - cam.CFrame.LookVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+		move = move - cam.CFrame.RightVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+		move = move + cam.CFrame.RightVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+		move = move + Vector3.new(0,1,0)
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.C) then
+		move = move - Vector3.new(0,1,0)
+	end
+	return move
+end
+
+-- main loop
+RunService.RenderStepped:Connect(function()
+	if not character or not humanoid or not rootPart then return end
+
+	local flySpeed = FLY_SPEED
+	local walkSpeed = BASE_WALK_SPEED
+	if boosting then
+		flySpeed = flySpeed * BOOST_MULTIPLIER
+		walkSpeed = walkSpeed * BOOST_MULTIPLIER
+	end
+
+	if flying then
+		humanoid.WalkSpeed = 0
+		local moveVec = getMoveVector()
+		if moveVec.Magnitude > 0.1 then
+			rootPart.Velocity = moveVec.Unit * flySpeed
+		else
+			rootPart.Velocity = Vector3.new(0,0,0)
+		end
+	else
+		humanoid.PlatformStand = false
+		humanoid.WalkSpeed = walkSpeed
+	end
+end)
+
+-- notify players about controls
+pcall(function()
+	game:GetService("StarterGui"):SetCore("SendNotification", {
+		Title = "Test Powers Enabled";
+		Text = "F = Fly • Shift = Boost • Space = Infinite Jump • Ctrl/C = Descend";
+		Duration = 6;
+	})
+end)
+
