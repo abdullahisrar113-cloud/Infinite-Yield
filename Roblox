@@ -1,0 +1,83 @@
+-- AbilityManager (ServerScript)
+-- Put in ServerScriptService
+
+local Players = game:GetService("Players")
+
+-- Default ability settings (change as you like)
+local DEFAULTS = {
+    SpeedMultiplier = 2,    -- 2x walk speed
+    JumpMultiplier  = 1.5,  -- 1.5x jump power
+    Invincible      = true, -- damage immunity
+    CanFly          = true, -- allow clients to toggle flight
+}
+
+local function applyAbilitiesToCharacter(player, character)
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    -- Store original values so you can restore later
+    if not player:FindFirstChild("OriginalWalkSpeed") then
+        local v = Instance.new("NumberValue")
+        v.Name = "OriginalWalkSpeed"
+        v.Value = humanoid.WalkSpeed
+        v.Parent = player
+    end
+    if not player:FindFirstChild("OriginalJumpPower") then
+        local v = Instance.new("NumberValue")
+        v.Name = "OriginalJumpPower"
+        v.Value = humanoid.JumpPower or 50
+        v.Parent = player
+    end
+
+    -- apply speed/jump
+    humanoid.WalkSpeed = (player:FindFirstChild("SpeedMultiplier") and player.SpeedMultiplier.Value or DEFAULTS.SpeedMultiplier) * player.OriginalWalkSpeed.Value
+    humanoid.JumpPower = (player:FindFirstChild("JumpMultiplier") and player.JumpMultiplier.Value or DEFAULTS.JumpMultiplier) * player.OriginalJumpPower.Value
+
+    -- invincibility: connect to Humanoid.HealthChanged
+    if humanoid and not humanoid:FindFirstChild("InvConn") then
+        local conn
+        conn = humanoid.HealthChanged:Connect(function(health)
+            local inv = player:FindFirstChild("Invincible") and player.Invincible.Value or DEFAULTS.Invincible
+            if inv and humanoid.Health < humanoid.MaxHealth then
+                humanoid.Health = humanoid.MaxHealth
+            end
+        end)
+        local marker = Instance.new("ObjectValue")
+        marker.Name = "InvConn"
+        marker.Value = nil
+        marker.Parent = humanoid
+        -- store conn in attribute for cleanup? (Roblox won't serialize functions)
+        -- We leave it simple: when character removed, connection will be garbage collected.
+    end
+end
+
+local function setupPlayer(player)
+    -- Create attributes under player for runtime toggles
+    local speed = Instance.new("NumberValue"); speed.Name = "SpeedMultiplier"; speed.Value = DEFAULTS.SpeedMultiplier; speed.Parent = player
+    local jump  = Instance.new("NumberValue"); jump.Name = "JumpMultiplier"; jump.Value = DEFAULTS.JumpMultiplier; jump.Parent = player
+    local inv   = Instance.new("BoolValue");   inv.Name = "Invincible";     inv.Value = DEFAULTS.Invincible;     inv.Parent = player
+    local fly   = Instance.new("BoolValue");   fly.Name = "CanFly";         fly.Value = DEFAULTS.CanFly;         fly.Parent = player
+
+    player.CharacterAdded:Connect(function(character)
+        wait(0.1)
+        applyAbilitiesToCharacter(player, character)
+    end)
+
+    -- If character already exists (possible on respawn timing)
+    if player.Character then
+        applyAbilitiesToCharacter(player, player.Character)
+    end
+end
+
+Players.PlayerAdded:Connect(setupPlayer)
+
+-- Admin / dev utilities: change for everyone quickly
+local function setForAll(name, value)
+    for _,p in pairs(Players:GetPlayers()) do
+        local v = p:FindFirstChild(name)
+        if v then v.Value = value end
+    end
+end
+
+-- Example: quickly disable flight for everyone:
+-- setForAll("CanFly", false)
